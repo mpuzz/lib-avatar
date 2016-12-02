@@ -1,23 +1,24 @@
+#include "Python.h"
 #include "libavatar.h"
 #include <mutex>
 #include <ctime>
-
+#include <thread>
 extern "C" {
 #include "avatar-msgs.h"
 }
 
-std::mutex m;
+static std::mutex m;
 static bool stop;
 
-mqd_t io_request;
-mqd_t io_response;
-mqd_t irq;
+static mqd_t io_request;
+static mqd_t io_response;
+static mqd_t irq;
 
 static irq_callback callback;
 
-int msg_count = 0;
+static int msg_count = 0;
 
-mqd_t open_mq(char *mq_name, mqs mq_type)
+static mqd_t open_mq(char *mq_name, mqs mq_type)
 {
   switch(mq_type)
     {
@@ -41,7 +42,7 @@ mqd_t open_mq(char *mq_name, mqs mq_type)
     }
 }
 
-int dispatch_io(std::uint32_t address, std::size_t size, bool write, void *buffer)
+static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void *buffer)
 {
   AvatarIORequestMessage req;
   AvatarIOResponseMessage resp;
@@ -92,7 +93,7 @@ int dispatch_io(std::uint32_t address, std::size_t size, bool write, void *buffe
   return 0;
 }
 
-void register_IRQ_callback(irq_callback cb)
+static void register_IRQ_callback(irq_callback cb)
 {
   callback = cb;
 }
@@ -120,7 +121,7 @@ static inline bool should_stop()
   return stop;
 }
 
-void wait_for_IRQs()
+static void wait_for_IRQs()
 {
   IRQ_MSG msg;
   unset_stop();
@@ -139,4 +140,152 @@ void wait_for_IRQs()
       if(should_stop())
 	break;
     }
+}
+
+void stop_IRQ_handling()
+{
+  std::lock_guard<std::mutex> lg(m);
+  stop = false;
+}
+
+/*************************************************************
+                    Python wrappers
+*************************************************************/
+static PyObject *avatar_open_mq(PyObject *self, PyObject *args)
+{
+  char *path;
+  mqs type;
+  mqd_t ret;
+
+  if(!PyArg_ParseTuple(args, "si", &path, &type))
+    {
+      return NULL;
+    }
+  ret = open_mq(path, type);
+  if(ret <= 0)
+    return NULL;
+  return PyLong_FromLong(ret);
+}
+
+static PyObject *avatar_write(PyObject *self, PyObject *args)
+{
+  std::uint32_t address;
+  std::size_t size;
+  std::uint64_t value;
+  int ret;
+
+  if(!PyArg_ParseTuple(args, "lil", &address, &size, &value))
+    {
+      return NULL;
+    }
+
+  if(size <= 0 || size > 4)
+    {
+      return NULL;
+    }
+
+  ret = dispatch_io(address, size, true, &value);
+  if(ret)
+    {
+      return NULL;
+    }
+  return PyLong_FromLong(0);
+}
+
+static PyObject *avatar_read(PyObject *self, PyObject *args)
+{
+  std::uint32_t address;
+  std::size_t size;
+  std::uint64_t value;
+  int ret;
+
+  if(!PyArg_ParseTuple(args, "lil", &address, &size))
+    {
+      return NULL;
+    }
+
+  if(size <= 0 || size > 4)
+    {
+      return NULL;
+    }
+
+  ret = dispatch_io(address, size, false, &value);
+  if(ret)
+    {
+      return NULL;
+    }
+  return PyLong_FromUnsignedLong(value);
+}
+
+static PyObject *python_callback = NULL;
+static std::thread *irq_thread;
+
+static PyObject *avatar_register_IRQ_callback(PyObject *self, PyObject *args)
+{
+  PyObject *result = NULL;
+  PyObject *temp;
+
+  if (PyArg_ParseTuple(args, "O", &temp))
+    {
+      if (!PyCallable_Check(temp))
+	{
+	  PyErr_SetString(PyExc_TypeError, "parameter must be callable");
+	  return NULL;
+	}
+      Py_XINCREF(temp);         /* Add a reference to new callback */
+      Py_XDECREF(python_callback);  /* Dispose of previous callback */
+      python_callback = temp;       /* Remember new callback */
+      /* Boilerplate to return "None" */
+      Py_INCREF(Py_None);
+      result = Py_None;
+    }
+  return result;
+}
+
+static void execute_callback(int irq)
+{
+  Py_BEGIN_ALLOW_THREADS
+
+    PyObject *arg = Py_BuildValue("(i)", irq);
+    PyObject_Call(python_callback, arg, NULL);
+
+  Py_END_ALLOW_THREADS
+}
+
+static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
+{
+  if(python_callback == NULL)
+    {
+      return NULL;
+    }
+  register_IRQ_callback(execute_callback);
+  irq_thread = new std::thread(wait_for_IRQs);
+  Py_INCREF(Py_None);
+  return Py_None;
+}
+
+static PyObject *avatar_irq_stop(PyObject *self, PyObject *args)
+{
+  stop_IRQ_handling();
+  irq_thread->join();
+  Py_INCREF(Py_None);
+  return Py_None;
+}
+
+static PyMethodDef AvatarMethods[] = {
+  {"open_mq", avatar_open_mq, METH_VARARGS, "Initialize specific IPC channel to the emulator"},
+  {"write", avatar_write, METH_VARARGS, "Request a write operation"},
+  {"read", avatar_read, METH_VARARGS, "Request a read operation"},
+  {"register_IRQ_callback", avatar_register_IRQ_callback, METH_VARARGS, "Register a callback to manage IRQs"},
+  {"irq_start", avatar_irq_start, METH_VARARGS, "Start a thread that manages IRQs"},
+  {"irq_stop", avatar_irq_stop, METH_VARARGS, "Stop the thread that manages the IRQs"},
+  {NULL, NULL, NULL, NULL}
+};
+
+PyMODINIT_FUNC initavatar(void)
+{
+  PyObject *module = Py_InitModule("avatar", AvatarMethods);
+  PyModule_AddIntConstant(module, "IOREQ", IOREQ);
+  PyModule_AddIntConstant(module, "IORESP", IORESP);
+  PyModule_AddIntConstant(module, "IRQ", IRQ);
 }

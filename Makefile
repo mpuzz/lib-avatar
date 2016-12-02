@@ -1,9 +1,10 @@
 CC = g++ # C compiler
-INC = -Iinclude
+INC = -Iinclude $(shell python-config --cflags)
 CFLAGS = -std=c++11 -fPIC -Wall -Wextra -O2 -g $(INC) # C flags
-LDFLAGS = -shared  # linking flags
-RM = rm -f  # rm command
-TARGET_LIB = libavatar.so # target lib
+LDFLAGS = -shared -lrt # linking flags
+RM = rm -rf  # rm command
+DST_DIR = lib
+TARGET_LIB = avatar.so # target lib
 
 SRCS = libavatar.c # source files
 OBJS = $(SRCS:.c=.o)
@@ -11,19 +12,17 @@ OBJS = $(SRCS:.c=.o)
 .PHONY: all
 all: ${TARGET_LIB}
 
-$(TARGET_LIB): $(OBJS)
-	$(CC) ${LDFLAGS} -o $@ $^
+$(DST_DIR):
+	@mkdir $@
 
-$(SRCS:.c=.d):%.d:%.c
-	$(CC) $(CFLAGS) -MM $< >$@
-
-include $(SRCS:.c=.d)
+$(TARGET_LIB): $(SRCS) $(DST_DIR)
+	$(CC) $(INC) $(CFLAGS) -o $(DST_DIR)/$@ $(SRCS) $(LDFLAGS)
 
 .PHONY: clean
 clean:
-	-${RM} ${TARGET_LIB} ${OBJS} $(SRCS:.c=.d)
+	-${RM} $(DST_DIR) ${OBJS} $(SRCS:.c=.d)
 
 .PHONY: install
 prefix=/usr
 install: ${TARGET_LIB}
-	install -m 0755 ${TARGET_LIB} $(prefix)/lib
+	install -m 0755 $(DST_DIR)/${TARGET_LIB} $(prefix)/lib

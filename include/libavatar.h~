@@ -1,0 +1,21 @@
+#include <cstdio>
+#include <cstdint>
+#include <mqueue.h>
+
+enum mqs
+  {
+    IOREQ,
+    IORESP,
+    IRQ
+  };
+
+extern mqd_t io_request;
+extern mqd_t io_response;
+extern mqd_t irq;
+
+void open_mq(char *mq_name, mqs mq_type);
+int dispatch_read(std::uint32_t address, std::size_t size, void *buffer);
+int dispatch_write(std::uint32_t, std::size_t size, void *buffer);
+
+void register_IRQ_callback(void (*callback)(int));
+void wait_for_IRQs();

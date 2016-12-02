@@ -1,0 +1,26 @@
+#ifndef AVATAR_MSG
+#define AVATAR_MSG
+
+struct _IRQ_MSG {
+  uint32_t irq_num;
+  uint32_t level;
+};
+
+struct _AvatarIORequestMessage {
+  uint64_t id;
+  uint64_t hwaddr;
+  uint64_t value;
+  bool write;
+};
+
+struct _AvatarIOResponseMessage {
+  uint64_t id;
+  uint64_t value;
+  bool success;
+};
+
+typedef struct _AvatarIORequestMessage  AvatarIORequestMessage;
+typedef struct _AvatarIOResponseMessage AvatarIOResponseMessage;
+typedefstruct _IRQ_MSG IRQ_MSG;
+
+#endif

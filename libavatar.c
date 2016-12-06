@@ -29,7 +29,7 @@ static mqd_t open_mq(char *mq_name, mqs mq_type)
       }
     case IORESP:
       {
-	io_response= mq_open(mq_name, O_RDONLY);
+	io_response = mq_open(mq_name, O_RDONLY);
 	return io_response;
       }
     case IRQ:
@@ -78,6 +78,7 @@ static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void
       fprintf(stderr, "Error. Wrong id\n");
       return -3;
     }
+
   if(!resp.success)
     {
       fprintf(stderr, "Error. IO did not succeeded\n");
@@ -109,7 +110,7 @@ static inline int mq_receive_5ms(mqd_t mq, char *buf, std::size_t size)
   struct timespec tm;
 
   clock_gettime(CLOCK_REALTIME, &tm);
-  tm.tv_nsec += 5 * 1000 * 1000;
+  tm.tv_nsec = 5 * 1000 * 1000;
   int ret = mq_timedreceive(mq, buf, size, NULL, &tm);
 
   return (ret < 0 && errno == ETIMEDOUT) ? 0: ret;
@@ -124,12 +125,16 @@ static inline bool should_stop()
 static void wait_for_IRQs()
 {
   IRQ_MSG msg;
+
+  if(irq == 0)
+    return;
+
   unset_stop();
+
   while(true)
     {
       std::size_t ret = mq_receive_5ms(irq, (char *) &msg, sizeof(msg));
-
-      if(ret <= 0)
+      if(ret < 0)
 	{
 	  fprintf(stderr, "Error reading processing incoming interrupt\n");
 	}
@@ -145,7 +150,7 @@ static void wait_for_IRQs()
 void stop_IRQ_handling()
 {
   std::lock_guard<std::mutex> lg(m);
-  stop = false;
+  stop = true;
 }
 
 /*************************************************************
@@ -232,6 +237,7 @@ static PyObject *avatar_register_IRQ_callback(PyObject *self, PyObject *args)
 	  PyErr_SetString(PyExc_TypeError, "parameter must be callable");
 	  return NULL;
 	}
+
       Py_XINCREF(temp);         /* Add a reference to new callback */
       Py_XDECREF(python_callback);  /* Dispose of previous callback */
       python_callback = temp;       /* Remember new callback */
@@ -244,12 +250,14 @@ static PyObject *avatar_register_IRQ_callback(PyObject *self, PyObject *args)
 
 static void execute_callback(int irq)
 {
-  Py_BEGIN_ALLOW_THREADS
+  PyGILState_STATE gstate;
+  gstate = PyGILState_Ensure();
 
-    PyObject *arg = Py_BuildValue("(i)", irq);
-    PyObject_Call(python_callback, arg, NULL);
-
-  Py_END_ALLOW_THREADS
+  PyObject *arg = Py_BuildValue("(i)", irq);
+  Py_INCREF(arg);
+  PyObject_Call(python_callback, arg, NULL);
+  Py_DECREF(arg);
+  PyGILState_Release(gstate);
 }
 
 static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
@@ -267,7 +275,9 @@ static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
 static PyObject *avatar_irq_stop(PyObject *self, PyObject *args)
 {
   stop_IRQ_handling();
+
   irq_thread->join();
+
   Py_INCREF(Py_None);
   return Py_None;
 }
@@ -288,4 +298,5 @@ PyMODINIT_FUNC initavatar(void)
   PyModule_AddIntConstant(module, "IOREQ", IOREQ);
   PyModule_AddIntConstant(module, "IORESP", IORESP);
   PyModule_AddIntConstant(module, "IRQ", IRQ);
+  PyEval_InitThreads();
 }

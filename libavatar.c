@@ -3,6 +3,7 @@
 #include <mutex>
 #include <ctime>
 #include <thread>
+#include <sys/select.h>
 extern "C" {
 #include "avatar-msgs.h"
 }
@@ -44,6 +45,7 @@ static mqd_t open_mq(char *mq_name, mqs mq_type)
 
 static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void *buffer)
 {
+  Py_BEGIN_ALLOW_THREADS
   AvatarIORequestMessage req;
   AvatarIOResponseMessage resp;
   std::size_t byte_read;
@@ -88,9 +90,9 @@ static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void
   if(!write)
     {
       uint64_t *cast = (uint64_t *) buffer;
-      *cast = req.value;
+      *cast = resp.value;
     }
-
+  Py_END_ALLOW_THREADS
   return 0;
 }
 
@@ -105,15 +107,30 @@ static inline void unset_stop()
   stop = false;
 }
 
-static inline int mq_receive_5ms(mqd_t mq, char *buf, std::size_t size)
+static inline int mq_receive_timeout(mqd_t mq, char *buf, std::size_t size)
 {
-  struct timespec tm;
+  fd_set set;
+  struct timeval timeout;
+  int res;
 
-  clock_gettime(CLOCK_REALTIME, &tm);
-  tm.tv_nsec = 5 * 1000 * 1000;
-  int ret = mq_timedreceive(mq, buf, size, NULL, &tm);
+  FD_ZERO(&set);
+  FD_SET(mq, &set);
 
-  return (ret < 0 && errno == ETIMEDOUT) ? 0: ret;
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 10;
+  res = select(mq+1, &set, NULL, NULL, &timeout);
+  if(res == -1)
+    {
+      fprintf(stderr, "Error reading from IRQs queue: %d\n", errno);
+      return -1;
+    }
+  if(res == 0)
+    {
+      return 0;
+    }
+  int ret = mq_receive(mq, buf, size, NULL);
+
+  return ret;
 }
 
 static inline bool should_stop()
@@ -133,12 +150,8 @@ static void wait_for_IRQs()
 
   while(true)
     {
-      std::size_t ret = mq_receive_5ms(irq, (char *) &msg, sizeof(msg));
-      if(ret < 0)
-	{
-	  fprintf(stderr, "Error reading processing incoming interrupt\n");
-	}
-      else if(ret > 0)
+      std::size_t ret = mq_receive_timeout(irq, (char *) &msg, sizeof(msg));
+      if(ret > 0)
 	{
 	  callback(msg.irq_num);
 	}
@@ -186,10 +199,12 @@ static PyObject *avatar_write(PyObject *self, PyObject *args)
 
   if(size <= 0 || size > 4)
     {
+      fprintf(stderr, "asdasdasd %d, %d\n", size, 4 > 4);
       return NULL;
     }
 
   ret = dispatch_io(address, size, true, &value);
+
   if(ret)
     {
       return NULL;
@@ -204,7 +219,7 @@ static PyObject *avatar_read(PyObject *self, PyObject *args)
   std::uint64_t value;
   int ret;
 
-  if(!PyArg_ParseTuple(args, "lil", &address, &size))
+  if(!PyArg_ParseTuple(args, "li", &address, &size))
     {
       return NULL;
     }
@@ -215,6 +230,7 @@ static PyObject *avatar_read(PyObject *self, PyObject *args)
     }
 
   ret = dispatch_io(address, size, false, &value);
+
   if(ret)
     {
       return NULL;
@@ -262,6 +278,7 @@ static void execute_callback(int irq)
 
 static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
 {
+
   if(python_callback == NULL)
     {
       return NULL;
@@ -274,10 +291,11 @@ static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
 
 static PyObject *avatar_irq_stop(PyObject *self, PyObject *args)
 {
+  Py_BEGIN_ALLOW_THREADS
   stop_IRQ_handling();
 
   irq_thread->join();
-
+  Py_END_ALLOW_THREADS
   Py_INCREF(Py_None);
   return Py_None;
 }

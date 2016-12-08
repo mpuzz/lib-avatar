@@ -1,6 +1,6 @@
 CC = g++ # C compiler
 INC = -Iinclude $(shell python-config --cflags)
-CFLAGS = -std=c++11 -fPIC -Wall -Wextra -O2 -g $(INC) # C flags
+CFLAGS = -std=c++11 -fPIC -Wall -Wextra -g3 $(INC) # C flags
 LDFLAGS = -shared -lrt # linking flags
 RM = rm -rf  # rm command
 DST_DIR = lib

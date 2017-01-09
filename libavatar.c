@@ -3,6 +3,7 @@
 #include <mutex>
 #include <ctime>
 #include <thread>
+#include <map>
 #include <sys/select.h>
 extern "C" {
 #include "avatar-msgs.h"
@@ -11,27 +12,31 @@ extern "C" {
 static std::mutex m;
 static bool stop;
 
-static mqd_t io_request;
-static mqd_t io_response;
+static std::map<int, mqd_t> io_request;
+static std::map<int, mqd_t> io_response;
 static mqd_t irq;
 
 static irq_callback callback;
 
 static int msg_count = 0;
+static int distinct_states = 0;
 
-static mqd_t open_mq(char *mq_name, mqs mq_type)
+static mqd_t open_mq(char *mq_name, mqs mq_type, int state_id)
 {
+  mqd_t queue;
   switch(mq_type)
     {
     case IOREQ:
       {
-	io_request = mq_open(mq_name, O_WRONLY);
-	return io_request;
+	queue = mq_open(mq_name, O_WRONLY);
+	io_request.insert(std::pair<int, mqd_t>(state_id, queue));
+	return queue;
       }
     case IORESP:
       {
-	io_response = mq_open(mq_name, O_RDONLY);
-	return io_response;
+	queue = mq_open(mq_name, O_RDONLY);
+	io_response.insert(std::pair<int, mqd_t>(state_id, queue));
+	return queue;
       }
     case IRQ:
       {
@@ -43,23 +48,32 @@ static mqd_t open_mq(char *mq_name, mqs mq_type)
     }
 }
 
-static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void *buffer)
+static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void *buffer, int state)
 {
   Py_BEGIN_ALLOW_THREADS
   AvatarIORequestMessage req;
   AvatarIOResponseMessage resp;
   std::size_t byte_read;
+  mqd_t io_req, io_resp;
 
   req.id = msg_count++;
   req.hwaddr = address;
-  req.write = write;
+  req.state = state;
+
+  io_req = io_request[state];
+  io_resp = io_response[state];
 
   if(write)
     {
       req.value = *(std::uint64_t *) buffer;
+      req.operation = AVATAR_WRITE;
+    }
+  else
+    {
+      req.operation = AVATAR_READ;
     }
 
-  if(mq_send(io_request, (char *) &req, sizeof(req), 0))
+  if(mq_send(io_req, (char *) &req, sizeof(req), 0))
     {
       fprintf(stderr, "Send failed with error: %d\n", errno);
       return -1;
@@ -67,7 +81,7 @@ static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void
 
   do
     {
-      byte_read = mq_receive(io_response, (char *) &resp, sizeof(resp), NULL);
+      byte_read = mq_receive(io_resp, (char *) &resp, sizeof(resp), NULL);
       if(byte_read != sizeof(resp))
 	{
 	  fprintf(stderr, "Error in receiving message: %d\n", errno);
@@ -83,7 +97,7 @@ static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void
 
   if(!resp.success)
     {
-      fprintf(stderr, "Error. IO did not succeeded\n");
+      fprintf(stderr, "Error. IO did not succeed\n");
       return -4;
     }
 
@@ -93,6 +107,67 @@ static int dispatch_io(std::uint32_t address, std::size_t size, bool write, void
       *cast = resp.value;
     }
   Py_END_ALLOW_THREADS
+  return 0;
+}
+
+static int dispatch_fork(std::uint32_t parent)
+{
+  AvatarIORequestMessage req;
+  AvatarIOResponseMessage resp;
+  std::size_t byte_read;
+  mqd_t io_req, io_res;
+
+  io_req = io_request[parent];
+  io_res = io_response[parent];
+
+  req.id = msg_count++;
+  req.hwaddr = 0;
+  req.operation = AVATAR_FORK;
+  req.state = distinct_states++;
+  sprintf(req.new_mq, "q%d", req.state);
+
+  if(mq_send(io_req, (char *) &req, sizeof(req), 0))
+    {
+      fprintf(stderr, "Send failed with error: %d\n", errno);
+      return -1;
+    }
+
+  do
+    {
+      byte_read = mq_receive(io_res, (char *) &resp, sizeof(resp), NULL);
+      if(byte_read != sizeof(resp))
+	{
+	  fprintf(stderr, "Error in receiving message: %d\n", errno);
+	  return -2;
+	}
+    } while(resp.id != req.id);
+
+  if(resp.id != req.id || req.state != resp.state)
+    {
+      fprintf(stderr, "Error. Wrong id\n");
+      return -3;
+    }
+
+  if(!resp.success)
+    {
+      fprintf(stderr, "Error. Fork did not succeed\n");
+      return -4;
+    }
+
+  mqd_t mreq, mres;
+  char *req_name, *res_name;
+
+  sprintf(req_name, "%sreq", req.new_mq);
+  sprintf(res_name, "%sresp", req.new_mq);
+
+  mreq = mq_open(req_name, O_WRONLY);
+  mres = mq_open(res_name, O_RDONLY);
+  io_request.insert(std::pair<int, mqd_t>(req.state, mreq));
+  io_response.insert(std::pair<int, mqd_t>(req.state, mres));
+}
+
+static int dispatch_kill(std::uint32_t state)
+{
   return 0;
 }
 
@@ -179,7 +254,7 @@ static PyObject *avatar_qemu_open_mq(PyObject *self, PyObject *args)
     {
       return NULL;
     }
-  ret = open_mq(path, type);
+  ret = open_mq(path, type, 0);
   if(ret <= 0)
     return NULL;
   return PyLong_FromLong(ret);
@@ -190,20 +265,15 @@ static PyObject *avatar_qemu_write(PyObject *self, PyObject *args)
   std::uint32_t address;
   std::size_t size;
   std::uint64_t value;
+  std::int32_t state = 0;
   int ret;
 
-  if(!PyArg_ParseTuple(args, "lil", &address, &size, &value))
+  if(!PyArg_ParseTuple(args, "lil|l", &address, &size, &value, &state))
     {
       return NULL;
     }
 
-  if(size <= 0 || size > 4)
-    {
-      fprintf(stderr, "asdasdasd %d, %d\n", size, 4 > 4);
-      return NULL;
-    }
-
-  ret = dispatch_io(address, size, true, &value);
+  ret = dispatch_io(address, size, true, &value, state);
 
   if(ret)
     {
@@ -217,9 +287,10 @@ static PyObject *avatar_qemu_read(PyObject *self, PyObject *args)
   std::uint32_t address;
   std::size_t size;
   std::uint64_t value;
+  std::int32_t state = 0;
   int ret;
 
-  if(!PyArg_ParseTuple(args, "li", &address, &size))
+  if(!PyArg_ParseTuple(args, "li|l", &address, &size, &state))
     {
       return NULL;
     }
@@ -229,13 +300,47 @@ static PyObject *avatar_qemu_read(PyObject *self, PyObject *args)
       return NULL;
     }
 
-  ret = dispatch_io(address, size, false, &value);
+  ret = dispatch_io(address, size, false, &value, state);
 
   if(ret)
     {
       return NULL;
     }
   return PyLong_FromUnsignedLong(value);
+}
+
+static PyObject *avatar_qemu_fork(PyObject *self, PyObject *args)
+{
+  std::uint32_t parent;
+  int ret;
+  if(!PyArg_ParseTuple(args, "l", &parent))
+    {
+      return NULL;
+    }
+
+  ret = dispatch_fork(parent);
+
+  if(ret)
+    return NULL;
+
+  return PyLong_FromLong(0);
+}
+
+static PyObject *avatar_qemu_kill(PyObject *self, PyObject *args)
+{
+  std::uint32_t state;
+  int ret;
+  if(!PyArg_ParseTuple(args, "l", &state))
+    {
+      return NULL;
+    }
+
+  ret = dispatch_kill(state);
+
+  if(ret)
+    return NULL;
+
+  return PyLong_FromLong(0);
 }
 
 static PyObject *python_callback = NULL;
@@ -304,6 +409,8 @@ static PyMethodDef AvatarMethods[] = {
   {"open_mq", avatar_qemu_open_mq, METH_VARARGS, "Initialize specific IPC channel to the emulator"},
   {"write", avatar_qemu_write, METH_VARARGS, "Request a write operation"},
   {"read", avatar_qemu_read, METH_VARARGS, "Request a read operation"},
+  {"fork", avatar_qemu_fork, METH_VARARGS, "Request to the emulator to fork itself"},
+  {"kill", avatar_qemu_kill, METH_VARARGS, "Request the end of an instance of the emulator"},
   {"register_IRQ_callback", avatar_qemu_register_IRQ_callback, METH_VARARGS, "Register a callback to manage IRQs"},
   {"irq_start", avatar_qemu_irq_start, METH_VARARGS, "Start a thread that manages IRQs"},
   {"irq_stop", avatar_qemu_irq_stop, METH_VARARGS, "Stop the thread that manages the IRQs"},

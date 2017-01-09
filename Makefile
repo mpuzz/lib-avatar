@@ -4,7 +4,7 @@ CFLAGS = -std=c++11 -fPIC -Wall -Wextra -g3 $(INC) # C flags
 LDFLAGS = -shared -lrt # linking flags
 RM = rm -rf  # rm command
 DST_DIR = lib
-TARGET_LIB = avatar.so # target lib
+TARGET_LIB = avatar_qemu.so # target lib
 
 SRCS = libavatar.c # source files
 OBJS = $(SRCS:.c=.o)

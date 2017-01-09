@@ -169,7 +169,7 @@ void stop_IRQ_handling()
 /*************************************************************
                     Python wrappers
 *************************************************************/
-static PyObject *avatar_open_mq(PyObject *self, PyObject *args)
+static PyObject *avatar_qemu_open_mq(PyObject *self, PyObject *args)
 {
   char *path;
   mqs type;
@@ -185,7 +185,7 @@ static PyObject *avatar_open_mq(PyObject *self, PyObject *args)
   return PyLong_FromLong(ret);
 }
 
-static PyObject *avatar_write(PyObject *self, PyObject *args)
+static PyObject *avatar_qemu_write(PyObject *self, PyObject *args)
 {
   std::uint32_t address;
   std::size_t size;
@@ -212,7 +212,7 @@ static PyObject *avatar_write(PyObject *self, PyObject *args)
   return PyLong_FromLong(0);
 }
 
-static PyObject *avatar_read(PyObject *self, PyObject *args)
+static PyObject *avatar_qemu_read(PyObject *self, PyObject *args)
 {
   std::uint32_t address;
   std::size_t size;
@@ -241,7 +241,7 @@ static PyObject *avatar_read(PyObject *self, PyObject *args)
 static PyObject *python_callback = NULL;
 static std::thread *irq_thread;
 
-static PyObject *avatar_register_IRQ_callback(PyObject *self, PyObject *args)
+static PyObject *avatar_qemu_register_IRQ_callback(PyObject *self, PyObject *args)
 {
   PyObject *result = NULL;
   PyObject *temp;
@@ -276,7 +276,7 @@ static void execute_callback(int irq)
   PyGILState_Release(gstate);
 }
 
-static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
+static PyObject *avatar_qemu_irq_start(PyObject *self, PyObject *args)
 {
 
   if(python_callback == NULL)
@@ -289,7 +289,7 @@ static PyObject *avatar_irq_start(PyObject *self, PyObject *args)
   return Py_None;
 }
 
-static PyObject *avatar_irq_stop(PyObject *self, PyObject *args)
+static PyObject *avatar_qemu_irq_stop(PyObject *self, PyObject *args)
 {
   Py_BEGIN_ALLOW_THREADS
   stop_IRQ_handling();
@@ -301,18 +301,18 @@ static PyObject *avatar_irq_stop(PyObject *self, PyObject *args)
 }
 
 static PyMethodDef AvatarMethods[] = {
-  {"open_mq", avatar_open_mq, METH_VARARGS, "Initialize specific IPC channel to the emulator"},
-  {"write", avatar_write, METH_VARARGS, "Request a write operation"},
-  {"read", avatar_read, METH_VARARGS, "Request a read operation"},
-  {"register_IRQ_callback", avatar_register_IRQ_callback, METH_VARARGS, "Register a callback to manage IRQs"},
-  {"irq_start", avatar_irq_start, METH_VARARGS, "Start a thread that manages IRQs"},
-  {"irq_stop", avatar_irq_stop, METH_VARARGS, "Stop the thread that manages the IRQs"},
+  {"open_mq", avatar_qemu_open_mq, METH_VARARGS, "Initialize specific IPC channel to the emulator"},
+  {"write", avatar_qemu_write, METH_VARARGS, "Request a write operation"},
+  {"read", avatar_qemu_read, METH_VARARGS, "Request a read operation"},
+  {"register_IRQ_callback", avatar_qemu_register_IRQ_callback, METH_VARARGS, "Register a callback to manage IRQs"},
+  {"irq_start", avatar_qemu_irq_start, METH_VARARGS, "Start a thread that manages IRQs"},
+  {"irq_stop", avatar_qemu_irq_stop, METH_VARARGS, "Stop the thread that manages the IRQs"},
   {NULL, NULL, NULL, NULL}
 };
 
-PyMODINIT_FUNC initavatar(void)
+PyMODINIT_FUNC initavatar_qemu(void)
 {
-  PyObject *module = Py_InitModule("avatar", AvatarMethods);
+  PyObject *module = Py_InitModule("avatar_qemu", AvatarMethods);
   PyModule_AddIntConstant(module, "IOREQ", IOREQ);
   PyModule_AddIntConstant(module, "IORESP", IORESP);
   PyModule_AddIntConstant(module, "IRQ", IRQ);

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <mqueue.h>
 
+#define DEBUG_PRINT(...) if(debug) fprintf(stderr, __VA_ARGS__);
+
 enum mqs
   {
     IOREQ,
@@ -12,6 +14,6 @@ enum mqs
     IRQ
   };
 
-typedef void (*irq_callback)(int irq);
+typedef void (*irq_callback)(int irq, unsigned int state);
 
 #endif

@@ -9,6 +9,8 @@ extern "C" {
 #include "avatar-msgs.h"
 }
 
+static int debug = 0;
+
 static std::mutex m;
 static bool stop;
 
@@ -123,7 +125,7 @@ static int dispatch_fork(std::uint32_t parent)
   req.id = msg_count++;
   req.hwaddr = 0;
   req.operation = AVATAR_FORK;
-  req.state = distinct_states++;
+  req.state = ++distinct_states;
   sprintf(req.new_mq, "q%d", req.state);
 
   if(mq_send(io_req, (char *) &req, sizeof(req), 0))
@@ -134,6 +136,7 @@ static int dispatch_fork(std::uint32_t parent)
 
   do
     {
+      DEBUG_PRINT("Sending fork %d %d\n", distinct_states, parent);
       byte_read = mq_receive(io_res, (char *) &resp, sizeof(resp), NULL);
       if(byte_read != sizeof(resp))
 	{
@@ -154,16 +157,21 @@ static int dispatch_fork(std::uint32_t parent)
       return -4;
     }
 
-  mqd_t mreq, mres;
-  char *req_name, *res_name;
+  DEBUG_PRINT("Ack fork received\n");
 
-  sprintf(req_name, "%sreq", req.new_mq);
-  sprintf(res_name, "%sresp", req.new_mq);
+  mqd_t mreq, mres;
+  char req_name[20], res_name[20];
+
+  sprintf(req_name, "/%sreq", req.new_mq);
+  sprintf(res_name, "/%sresp", req.new_mq);
 
   mreq = mq_open(req_name, O_WRONLY);
   mres = mq_open(res_name, O_RDONLY);
+  DEBUG_PRINT("%d opening %s %s mqueue\n", distinct_states, req_name, res_name);
   io_request.insert(std::pair<int, mqd_t>(req.state, mreq));
   io_response.insert(std::pair<int, mqd_t>(req.state, mres));
+
+  return distinct_states;
 }
 
 static int dispatch_kill(std::uint32_t state)
@@ -228,7 +236,7 @@ static void wait_for_IRQs()
       std::size_t ret = mq_receive_timeout(irq, (char *) &msg, sizeof(msg));
       if(ret > 0)
 	{
-	  callback(msg.irq_num);
+	  callback(msg.irq_num, msg.state);
 	}
       if(should_stop())
 	break;
@@ -320,10 +328,10 @@ static PyObject *avatar_qemu_fork(PyObject *self, PyObject *args)
 
   ret = dispatch_fork(parent);
 
-  if(ret)
+  if(!ret)
     return NULL;
 
-  return PyLong_FromLong(0);
+  return PyLong_FromLong(ret);
 }
 
 static PyObject *avatar_qemu_kill(PyObject *self, PyObject *args)
@@ -369,12 +377,12 @@ static PyObject *avatar_qemu_register_IRQ_callback(PyObject *self, PyObject *arg
   return result;
 }
 
-static void execute_callback(int irq)
+static void execute_callback(int irq, uint32_t state)
 {
   PyGILState_STATE gstate;
   gstate = PyGILState_Ensure();
 
-  PyObject *arg = Py_BuildValue("(i)", irq);
+  PyObject *arg = Py_BuildValue("(iI)", irq);
   Py_INCREF(arg);
   PyObject_Call(python_callback, arg, NULL);
   Py_DECREF(arg);

@@ -22,6 +22,7 @@ static irq_callback callback;
 
 static int msg_count = 0;
 static int distinct_states = 0;
+static unsigned int max_states = 30;
 
 static mqd_t open_mq(char *mq_name, mqs mq_type, int state_id)
 {
@@ -119,6 +120,10 @@ static int dispatch_fork(std::uint32_t parent)
   std::size_t byte_read;
   mqd_t io_req, io_res;
 
+  if(distinct_states >= max_states)
+    {
+      return -5;
+    }
   io_req = io_request[parent];
   io_res = io_response[parent];
 
@@ -273,7 +278,7 @@ static PyObject *avatar_qemu_write(PyObject *self, PyObject *args)
   std::uint32_t address;
   std::size_t size;
   std::uint64_t value;
-  std::int32_t state = 0;
+  std::int64_t state = 0;
   int ret;
 
   if(!PyArg_ParseTuple(args, "lil|l", &address, &size, &value, &state))
@@ -293,18 +298,20 @@ static PyObject *avatar_qemu_write(PyObject *self, PyObject *args)
 static PyObject *avatar_qemu_read(PyObject *self, PyObject *args)
 {
   std::uint32_t address;
-  std::size_t size;
+  std::uint64_t size;
   std::uint64_t value;
-  std::int32_t state = 0;
+  std::int64_t state = 0;
   int ret;
 
-  if(!PyArg_ParseTuple(args, "li|l", &address, &size, &state))
+  if(!PyArg_ParseTuple(args, "ll|l", &address, &size, &state))
     {
+      DEBUG_PRINT("Parameter\n");
       return NULL;
     }
 
   if(size <= 0 || size > 4)
     {
+      DEBUG_PRINT("Size\n");
       return NULL;
     }
 
@@ -312,6 +319,7 @@ static PyObject *avatar_qemu_read(PyObject *self, PyObject *args)
 
   if(ret)
     {
+      DEBUG_PRINT("Ret: %d\n", ret);
       return NULL;
     }
   return PyLong_FromUnsignedLong(value);
@@ -382,7 +390,7 @@ static void execute_callback(int irq, uint32_t state)
   PyGILState_STATE gstate;
   gstate = PyGILState_Ensure();
 
-  PyObject *arg = Py_BuildValue("(iI)", irq);
+  PyObject *arg = Py_BuildValue("(ii)", irq, state);
   Py_INCREF(arg);
   PyObject_Call(python_callback, arg, NULL);
   Py_DECREF(arg);
@@ -413,6 +421,17 @@ static PyObject *avatar_qemu_irq_stop(PyObject *self, PyObject *args)
   return Py_None;
 }
 
+static PyObject *avatar_qemu_set_max_state_number(PyObject *self, PyObject *args)
+{
+  unsigned int max;
+  if(!PyArg_ParseTuple(args, "I", &max))
+    {
+      return NULL;
+    }
+  max_states = max;
+  return Py_None;
+}
+
 static PyMethodDef AvatarMethods[] = {
   {"open_mq", avatar_qemu_open_mq, METH_VARARGS, "Initialize specific IPC channel to the emulator"},
   {"write", avatar_qemu_write, METH_VARARGS, "Request a write operation"},
@@ -422,6 +441,7 @@ static PyMethodDef AvatarMethods[] = {
   {"register_IRQ_callback", avatar_qemu_register_IRQ_callback, METH_VARARGS, "Register a callback to manage IRQs"},
   {"irq_start", avatar_qemu_irq_start, METH_VARARGS, "Start a thread that manages IRQs"},
   {"irq_stop", avatar_qemu_irq_stop, METH_VARARGS, "Stop the thread that manages the IRQs"},
+  {"set_max_state_number", avatar_qemu_set_max_state_number, METH_VARARGS, "Set the maximum number of QEMU instances"},
   {NULL, NULL, NULL, NULL}
 };
 
